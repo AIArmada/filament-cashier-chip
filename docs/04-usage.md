@@ -1,8 +1,10 @@
 ---
-title: Admin Resources
+title: Usage
 ---
 
-# Admin Resources
+# Usage
+
+This guide covers the admin resources and portal-facing billing surfaces shipped by the plugin.
 
 Filament Cashier CHIP provides three main resources for managing billing data.
 
