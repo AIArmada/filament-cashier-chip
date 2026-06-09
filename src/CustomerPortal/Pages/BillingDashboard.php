@@ -2,7 +2,7 @@
 
 declare(strict_types=1);
 
-namespace AIArmada\FilamentCashierChip\Pages;
+namespace AIArmada\FilamentCashierChip\CustomerPortal\Pages;
 
 use AIArmada\FilamentCashierChip\Widgets\ActiveSubscribersWidget;
 use AIArmada\FilamentCashierChip\Widgets\AttentionRequiredWidget;
