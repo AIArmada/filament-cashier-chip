@@ -227,20 +227,6 @@ Uses PHP date format:
 ],
 ```
 
-## Resource Sort Order
-
-Change navigation order:
-
-```php
-'resources' => [
-    'navigation_sort' => [
-        'invoices' => 10,       // First
-        'subscriptions' => 20,  // Second
-        'customers' => 30,      // Third
-    ],
-],
-```
-
 ## Billing Portal Configuration
 
 ### Custom Panel ID
@@ -311,6 +297,20 @@ Billable customer models usually carry no owner tuple. Point
 `cashier-chip.features.owner.customer_resolver` at a custom
 `AIArmada\CashierChip\Contracts\CustomerOwnerResolverInterface` implementation
 when the default link/subscription mapping does not fit your tenancy model.
+
+## Resource Sort Order
+
+Change navigation order:
+
+```php
+'resources' => [
+    'navigation_sort' => [
+        'invoices' => 10,       // First
+        'subscriptions' => 20,  // Second
+        'customers' => 30,      // Third
+    ],
+],
+```
 
 ## Next Steps
 

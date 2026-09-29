@@ -16,7 +16,7 @@ Manage all subscriptions with full status tracking.
 
 - List all subscriptions with status badges
 - View subscription details and items
-- Filter by status, trial state, cancellation, grace period, and past due
+- Filter by status, trial, canceled, grace period, past due
 - Search by type, CHIP ID, price
 - Global search enabled
 
@@ -35,26 +35,25 @@ Manage all subscriptions with full status tracking.
 
 ### Status Colors
 
-Colors come from `FormatsSubscriptionStatus::getStatusColor()`:
-
 | Status | Color | Description |
 |--------|-------|-------------|
 | Active | Success (green) | Subscription is active |
 | Trialing | Warning (amber) | In trial period |
-| Canceled | Danger (red) | Canceled |
 | Past Due | Danger (red) | Payment failed |
+| Canceled | Danger (red) | Canceled but in grace period |
 | Incomplete | Warning (amber) | Initial payment pending |
-| Unpaid | Danger (red) | Subscription unpaid |
-| IncompleteExpired / anything else | Gray | — |
+| Paused | Gray | Temporarily paused |
 
 ### Infolist Sections
 
 The view page shows:
 
-1. **Subscription Details** – Type, status, price, quantity
-2. **Billing Information** – Interval, next billing date, recurring token
-3. **Trial & Cancellation** – Trial end, grace period, cancellation dates
-4. **Timestamps** – Created and updated dates
+1. **Subscription Overview** – Type, CHIP ID, status, quantity
+2. **Plan Details** – Price, billing interval, recurring token
+3. **Customer** – Owning billable model
+4. **Billing Schedule** – Trial end, next billing date, grace period, cancellation dates
+5. **Discount** – Applied coupon details
+6. **Timestamps** – Created and updated dates
 
 ### Relation Manager
 
@@ -69,30 +68,31 @@ The `SubscriptionItemsRelationManager` displays subscription line items:
 
 ### Customizing the Resource
 
-`SubscriptionResource` is `final`, so extend `BaseCashierChipResource` and
-register your own resource instead:
+Package resources are `final`, so build your own resource and reuse the
+package's table and infolist configurators:
 
 ```php
 namespace App\Filament\Resources;
 
 use AIArmada\CashierChip\Subscription\Subscription;
-use AIArmada\FilamentCashierChip\Resources\BaseCashierChipResource;
-use Filament\Support\Icons\Heroicon;
+use AIArmada\FilamentCashierChip\Resources\SubscriptionResource\Tables\SubscriptionTable;
+use Filament\Resources\Resource;
+use Filament\Tables\Table;
 
-class SubscriptionResource extends BaseCashierChipResource
+class CustomSubscriptionResource extends Resource
 {
     protected static ?string $model = Subscription::class;
 
-    protected static string | \BackedEnum | null $navigationIcon = Heroicon::OutlinedCreditCard;
+    protected static ?string $navigationIcon = 'heroicon-o-currency-dollar';
 
     public static function getNavigationLabel(): string
     {
         return 'My Subscriptions';
     }
 
-    protected static function navigationSortKey(): string
+    public static function table(Table $table): Table
     {
-        return 'subscriptions';
+        return SubscriptionTable::configure($table);
     }
 }
 ```
@@ -106,7 +106,7 @@ View billable models and their CHIP client information.
 - List all customers with CHIP IDs
 - View customer billing details
 - See associated subscriptions
-- Filter by CHIP link, payment method, subscriptions, and trial state
+- Filter by CHIP customer status
 
 ### Table Columns
 
@@ -114,28 +114,27 @@ View billable models and their CHIP client information.
 |--------|-------------|
 | Name | Customer name |
 | Email | Customer email |
-| Chip ID | CHIP client ID |
-| Linked | Whether the record is linked to CHIP |
-| Payment Method | Default stored payment method |
-| Subscriptions | Count of subscriptions |
-| Joined | Account creation date |
+| CHIP ID | CHIP client ID |
+| Subscriptions | Count of active subscriptions |
+| Created | Account creation date |
 
 ### Infolist Sections
 
-1. **Customer Information** – Name, email, phone
-2. **CHIP Details** – Client ID, default payment method
-3. **Subscriptions** – List of all subscriptions
+1. **Customer Details** – Name, email, phone
+2. **Billing Information** – CHIP client ID, default payment method
+3. **Subscription Status** – Trial state and subscription counts
+4. **Account Information** – Created and updated dates
 
 ### Customizing the Resource
 
-`CustomerResource` is `final`. To change the billable model, swap it at
-runtime instead of subclassing:
+The customer resource resolves its model from `Cashier::$customerModel`.
+To use a custom billable model, register it in a service provider:
 
 ```php
 use AIArmada\CashierChip\Billing\Cashier;
 
-// e.g. in a service provider boot()
-Cashier::useCustomerModel(App\Models\Team::class);
+// In AppServiceProvider::boot()
+Cashier::useCustomerModel(\App\Models\Team::class);
 ```
 
 ## InvoiceResource
@@ -161,16 +160,15 @@ Browse invoices from CHIP purchases.
 
 ### Invoice Statuses
 
-Statuses are CHIP purchase statuses, colored by
-`AIArmada\Chip\Models\Purchase::statusColor()`:
+Invoices are CHIP purchases, so the Status badge shows the purchase status
+with CHIP status colors, alongside a separate Paid icon:
 
 | Status | Color | Description |
 |--------|-------|-------------|
-| `paid`, `cleared`, `settled` | Success | Payment completed |
-| `hold`, `preauthorized`, `pending_execute`, `pending_charge`, `pending_capture`, `pending_release`, `pending_refund`, `overdue` | Warning | In flight / awaiting payment |
-| `refunded` | Info | Refunded |
-| `error`, `blocked`, `cancelled`, `released`, `expired`, `chargeback` | Danger | Failed or reversed |
-| anything else | Secondary | Unknown |
+| Paid / Cleared / Settled | Success | Payment completed |
+| Hold / Preauthorized / Pending * | Warning | Awaiting completion |
+| Refunded | Info | Payment refunded |
+| Error / Cancelled / Expired / … | Danger | Failed or ended |
 
 ## Owner Scoping
 
@@ -213,28 +211,33 @@ For super-admin panels that need global access:
 
 ### Subscription Actions
 
-The list is view-only at the row level (`ViewAction` only). Row and bulk
-actions are configured through the table, not a `getTableActions()` hook —
-that v3-era method no longer exists in Filament v5:
+The package table is view-only. Since the resource is `final`, add custom
+actions in your own resource's `table()` definition:
 
 ```php
-use Filament\Actions\Action;
+use AIArmada\FilamentCashierChip\Resources\SubscriptionResource\Tables\SubscriptionTable;
+use Filament\Tables\Actions\Action;
+use Filament\Tables\Table;
 
-// inside a Table::configure() chain
-->actions([
-    Action::make('cancel')
-        ->icon('heroicon-o-x-mark')
-        ->color('danger')
-        ->requiresConfirmation()
-        ->action(fn (Subscription $record) => $record->cancel()),
-])
-->bulkActions([
-    Action::make('resume')
-        ->requiresConfirmation()
-        ->action(function (Collection $records): void {
-            $records->each(fn (Subscription $record) => $record->unpause());
-        }),
-])
+public static function table(Table $table): Table
+{
+    $table = SubscriptionTable::configure($table);
+
+    return $table->actions([
+        ...$table->getRecordActions(),
+        Action::make('cancel')
+            ->icon('heroicon-o-x-mark')
+            ->color('danger')
+            ->requiresConfirmation()
+            ->action(fn ($record) => $record->cancel()),
+
+        Action::make('resume')
+            ->icon('heroicon-o-play')
+            ->color('success')
+            ->visible(fn ($record) => $record->onGracePeriod())
+            ->action(fn ($record) => $record->resume()),
+    ]);
+}
 ```
 
 ## Global Search
