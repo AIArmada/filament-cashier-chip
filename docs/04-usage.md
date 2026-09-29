@@ -16,7 +16,7 @@ Manage all subscriptions with full status tracking.
 
 - List all subscriptions with status badges
 - View subscription details and items
-- Filter by status, trial, canceled, grace period, past due
+- Filter by status, trial state, cancellation, grace period, and past due
 - Search by type, CHIP ID, price
 - Global search enabled
 
@@ -35,14 +35,17 @@ Manage all subscriptions with full status tracking.
 
 ### Status Colors
 
+Colors come from `FormatsSubscriptionStatus::getStatusColor()`:
+
 | Status | Color | Description |
 |--------|-------|-------------|
 | Active | Success (green) | Subscription is active |
 | Trialing | Warning (amber) | In trial period |
+| Canceled | Danger (red) | Canceled |
 | Past Due | Danger (red) | Payment failed |
-| Canceled | Danger (red) | Canceled but in grace period |
 | Incomplete | Warning (amber) | Initial payment pending |
-| Paused | Gray | Temporarily paused |
+| Unpaid | Danger (red) | Subscription unpaid |
+| IncompleteExpired / anything else | Gray | — |
 
 ### Infolist Sections
 
@@ -68,31 +71,30 @@ The `SubscriptionItemsRelationManager` displays subscription line items:
 
 ### Customizing the Resource
 
-Package resources are `final`, so build your own resource and reuse the
-package's table and infolist configurators:
+`SubscriptionResource` is `final`, so extend `BaseCashierChipResource` and
+register your own resource instead:
 
 ```php
 namespace App\Filament\Resources;
 
 use AIArmada\CashierChip\Subscription\Subscription;
-use AIArmada\FilamentCashierChip\Resources\SubscriptionResource\Tables\SubscriptionTable;
-use Filament\Resources\Resource;
-use Filament\Tables\Table;
+use AIArmada\FilamentCashierChip\Resources\BaseCashierChipResource;
+use Filament\Support\Icons\Heroicon;
 
-class CustomSubscriptionResource extends Resource
+class SubscriptionResource extends BaseCashierChipResource
 {
     protected static ?string $model = Subscription::class;
 
-    protected static ?string $navigationIcon = 'heroicon-o-currency-dollar';
+    protected static string | \BackedEnum | null $navigationIcon = Heroicon::OutlinedCreditCard;
 
     public static function getNavigationLabel(): string
     {
         return 'My Subscriptions';
     }
 
-    public static function table(Table $table): Table
+    protected static function navigationSortKey(): string
     {
-        return SubscriptionTable::configure($table);
+        return 'subscriptions';
     }
 }
 ```
@@ -106,7 +108,7 @@ View billable models and their CHIP client information.
 - List all customers with CHIP IDs
 - View customer billing details
 - See associated subscriptions
-- Filter by CHIP customer status
+- Filter by CHIP link, payment method, subscriptions, and trial state
 
 ### Table Columns
 
@@ -114,9 +116,11 @@ View billable models and their CHIP client information.
 |--------|-------------|
 | Name | Customer name |
 | Email | Customer email |
-| CHIP ID | CHIP client ID |
-| Subscriptions | Count of active subscriptions |
-| Created | Account creation date |
+| Chip ID | CHIP client ID |
+| Linked | Whether the record is linked to CHIP |
+| Payment Method | Default stored payment method |
+| Subscriptions | Count of subscriptions |
+| Joined | Account creation date |
 
 ### Infolist Sections
 
@@ -127,8 +131,8 @@ View billable models and their CHIP client information.
 
 ### Customizing the Resource
 
-The customer resource resolves its model from `Cashier::$customerModel`.
-To use a custom billable model, register it in a service provider:
+`CustomerResource` is `final`. To change the billable model, swap it at
+runtime instead of subclassing:
 
 ```php
 use AIArmada\CashierChip\Billing\Cashier;
@@ -160,15 +164,16 @@ Browse invoices from CHIP purchases.
 
 ### Invoice Statuses
 
-Invoices are CHIP purchases, so the Status badge shows the purchase status
-with CHIP status colors, alongside a separate Paid icon:
+Statuses are CHIP purchase statuses, colored by
+`AIArmada\Chip\Models\Purchase::statusColor()`:
 
 | Status | Color | Description |
 |--------|-------|-------------|
-| Paid / Cleared / Settled | Success | Payment completed |
-| Hold / Preauthorized / Pending * | Warning | Awaiting completion |
-| Refunded | Info | Payment refunded |
-| Error / Cancelled / Expired / … | Danger | Failed or ended |
+| `paid`, `cleared`, `settled` | Success | Payment completed |
+| `hold`, `preauthorized`, `pending_execute`, `pending_charge`, `pending_capture`, `pending_release`, `pending_refund`, `overdue` | Warning | In flight / awaiting payment |
+| `refunded` | Info | Refunded |
+| `error`, `blocked`, `cancelled`, `released`, `expired`, `chargeback` | Danger | Failed or reversed |
+| anything else | Secondary | Unknown |
 
 ## Owner Scoping
 
@@ -211,33 +216,28 @@ For super-admin panels that need global access:
 
 ### Subscription Actions
 
-The package table is view-only. Since the resource is `final`, add custom
-actions in your own resource's `table()` definition:
+The list is view-only at the row level (`ViewAction` only). Row and bulk
+actions are configured through the table, not a `getTableActions()` hook —
+that v3-era method no longer exists in Filament v5:
 
 ```php
-use AIArmada\FilamentCashierChip\Resources\SubscriptionResource\Tables\SubscriptionTable;
-use Filament\Tables\Actions\Action;
-use Filament\Tables\Table;
+use Filament\Actions\Action;
 
-public static function table(Table $table): Table
-{
-    $table = SubscriptionTable::configure($table);
-
-    return $table->actions([
-        ...$table->getRecordActions(),
-        Action::make('cancel')
-            ->icon('heroicon-o-x-mark')
-            ->color('danger')
-            ->requiresConfirmation()
-            ->action(fn ($record) => $record->cancel()),
-
-        Action::make('resume')
-            ->icon('heroicon-o-play')
-            ->color('success')
-            ->visible(fn ($record) => $record->onGracePeriod())
-            ->action(fn ($record) => $record->resume()),
-    ]);
-}
+// inside a Table::configure() chain
+->actions([
+    Action::make('cancel')
+        ->icon('heroicon-o-x-mark')
+        ->color('danger')
+        ->requiresConfirmation()
+        ->action(fn (Subscription $record) => $record->cancel()),
+])
+->bulkActions([
+    Action::make('resume')
+        ->requiresConfirmation()
+        ->action(function (Collection $records): void {
+            $records->each(fn (Subscription $record) => $record->unpause());
+        }),
+])
 ```
 
 ## Global Search

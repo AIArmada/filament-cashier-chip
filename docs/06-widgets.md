@@ -18,18 +18,24 @@ Monthly Recurring Revenue with trend analysis.
 - 6-month sparkline chart
 
 **Calculation:**
-- Sums all active subscription amounts
-- Normalizes to monthly (yearly ÷ 12, weekly × 4.33)
-- Subtracts active discounts
+- Sums `unit_amount` across a subscription's items (`withSum('items', 'unit_amount')`), multiplied
+  by the subscription `quantity`
+- Normalizes to monthly (day × 30, week × 4.33, month ÷ 1, year ÷ 12, each further ÷ the interval count)
+- Subtracts the coupon discount, normalized the same way
+- Never returns a negative value
 
 ```php
-// MRR calculation
+// MRR calculation (inside the widget)
 $monthlyAmount = $this->normalizeToMonthly(
-    $subscription->items->sum('unit_amount'),
-    $subscription->billing_interval,
-    $subscription->billing_interval_count
+    (int) $subscription->items_sum_unit_amount * (int) $subscription->quantity,
+    $subscription->billing_interval ?? 'month',
+    $subscription->billing_interval_count ?? 1,
 );
 ```
+
+> **warning**
+> Amounts stay in integer minor units. The 6-month sparkline in `getMRRChart()` is the one place that
+> divides by 100 before charting, so it assumes a 2-decimal currency.
 
 ### ActiveSubscribersWidget
 
@@ -37,12 +43,15 @@ Total count of active subscribers.
 
 **Displays:**
 - Current active subscriber count
-- Comparison with previous period
+- Comparison with the previous month
 - Trend indicator (up/down/stable)
+- 6-month sparkline
 
 **Counts subscriptions with status:**
-- Active
-- Trialing
+- Active (`scopeWhereActive`)
+- Trialing (`scopeWhereOnTrial`)
+
+Past Due subscriptions are **not** counted.
 
 ### ChurnRateWidget
 
@@ -55,21 +64,23 @@ Monthly churn rate percentage.
 
 **Calculation:**
 ```
-Churn Rate = (Canceled This Month / Active Start of Month) × 100
+Churn Rate = (Subscriptions with ends_at in this calendar month
+              / Subscriptions created before the month, not ended, active or trialing) × 100
 ```
 
 ### TrialConversionsWidget
 
 Trial-to-paid conversion rate.
 
-**Displays:**
-- Conversion percentage
-- Trial → Paid count
-- Comparison with previous period
+**Displays two stats:**
+- `Trial Conversion Rate` (percentage) with month-over-month comparison
+- `Active Trials` (current `scopeOnTrial` count)
 
 **Calculation:**
 ```
-Conversion Rate = (Trials Converted / Trials Expired) × 100
+Conversion Rate = (Trials whose trial_ends_at fell in this calendar month AND
+                   chip_status = 'active' AND ends_at IS NULL
+                   / All trials whose trial_ends_at fell in this calendar month) × 100
 ```
 
 ### AttentionRequiredWidget
@@ -77,33 +88,36 @@ Conversion Rate = (Trials Converted / Trials Expired) × 100
 Count of subscriptions needing attention.
 
 **Displays:**
-- A single "Attention Required" total with a breakdown description
-  (trials ending, past due, grace ending, incomplete, unpaid)
+- One stat: the total of all attention buckets, with a breakdown in the description
+- Trend icon switches between `ExclamationTriangle` (non-zero) and `CheckCircle` (zero)
 
-**Flags subscriptions with:**
-- Trial ending within 3 days
-- Past due status
-- Grace period ending within 3 days
-- Incomplete status
-- Unpaid status
+**Buckets (computed in one grouped query):**
+- Trials ending within the next 3 days
+- Subscriptions in `past_due`
+- Grace periods (`ends_at`) ending within the next 3 days
+- Subscriptions in `incomplete`
+- Subscriptions in `unpaid`
+
+The stat has no URL — it does not link to a filtered list. Renewal attempts are not consulted.
 
 ### RevenueChartWidget
 
 Revenue trend visualization over time.
 
 **Displays:**
-- Line chart of monthly revenue
-- 12 month history
-- Hover for exact values
+- Line chart (`getType()` returns `'line'`)
+- Two datasets: `MRR` and `New Revenue`
+- 12 months of history, `columnSpan = 'full'`, `pollingInterval = '120s'`
 
 ### SubscriptionDistributionWidget
 
-Subscriptions by plan/type distribution.
+Subscriptions grouped by **status**, not by plan.
 
 **Displays:**
-- Doughnut chart
-- Breakdown by subscription type
-- Percentage of each plan
+- Doughnut chart (`getType()` returns `'doughnut'`)
+- Buckets: Active, Trialing, Canceled, Past Due, Paused, Incomplete
+- Zero-count buckets are omitted from labels and data
+- `columnSpan = 1`, `pollingInterval = '120s'`
 
 ## Enabling Widgets
 
@@ -165,17 +179,17 @@ protected static ?int $sort = 1;
 ```
 
 Default sort order:
-1. MRRWidget
-2. ActiveSubscribersWidget
-3. ChurnRateWidget
-4. RevenueChartWidget
-5. SubscriptionDistributionWidget
-6. TrialConversionsWidget
-7. AttentionRequiredWidget
+1. `MRRWidget` (`$sort = 1`)
+2. `ActiveSubscribersWidget` (`$sort = 2`)
+3. `ChurnRateWidget` (`$sort = 3`)
+4. `RevenueChartWidget` (`$sort = 4`)
+5. `SubscriptionDistributionWidget` (`$sort = 5`)
+6. `TrialConversionsWidget` (`$sort = 6`)
+7. `AttentionRequiredWidget` (`$sort = 7`)
 
 ### Column Span
 
-Stats widgets use single column:
+Stats widgets override `getColumns()` (a `StatsOverviewWidget` API):
 
 ```php
 protected function getColumns(): int
@@ -184,68 +198,59 @@ protected function getColumns(): int
 }
 ```
 
-Chart widgets span multiple columns via the `$columnSpan` property:
+`MRRWidget`, `ActiveSubscribersWidget`, `ChurnRateWidget`, and `AttentionRequiredWidget` return 1;
+`TrialConversionsWidget` returns 2 because it renders two stats.
+
+Chart widgets extend `Filament\Widgets\ChartWidget`, which has no `getColumns()`. They set
+`$columnSpan` instead:
 
 ```php
-protected int|string|array $columnSpan = 2;
+protected int | string | array $columnSpan = 'full'; // RevenueChartWidget
+protected int | string | array $columnSpan = 1;      // SubscriptionDistributionWidget
 ```
 
 ## Customizing Widgets
 
-Package widgets are `final` with `private` calculation methods, so build
-your own widget for custom metrics instead of extending them:
-
-### Custom Stats Widget
+> **warning**
+> All seven widgets are declared `final`, so `extends MRRWidget` (or any of the others) is a fatal
+> error. To customize, write your own widget and reuse the shared data concern:
 
 ```php
 namespace App\Filament\Widgets;
 
 use AIArmada\CashierChip\Subscription\Subscription;
-use Filament\Widgets\StatsOverviewWidget as BaseWidget;
+use Filament\Widgets\StatsOverviewWidget;
 use Filament\Widgets\StatsOverviewWidget\Stat;
 
-class CustomMRRWidget extends BaseWidget
+class TargetWidget extends StatsOverviewWidget
 {
     protected static ?int $sort = 0; // First widget
 
     protected function getStats(): array
     {
+        $mrr = Subscription::query()
+            ->whereActive()
+            ->withSum('items', 'unit_amount')
+            ->get()
+            ->sum(fn (Subscription $s): int => (int) ($s->items_sum_unit_amount ?? 0) * (int) ($s->quantity ?? 1));
+
         return [
-            Stat::make('Target', '$10,000')
+            Stat::make('MRR vs Target', $mrr)
                 ->description('Monthly goal'),
         ];
     }
-
-    private function calculateMRR(): int
-    {
-        // Custom MRR calculation
-        return (int) Subscription::query()
-            ->whereActive()
-            ->whereNull('trial_ends_at') // Exclude trials
-            ->withSum('items', 'unit_amount')
-            ->get()
-            ->sum('items_sum_unit_amount');
-    }
 }
 ```
 
-### Custom Styling
+> **warning**
+> There is no `monthly_amount` column. MRR is the `withSum('items', 'unit_amount')` sub-select times
+> `quantity`, normalized per `billing_interval` and `billing_interval_count`, minus the normalized
+> coupon discount. Copy the real `MRRWidget::monthlyNetAmount()` logic rather than summing a
+> non-existent column. `whereActive()` is a valid `scopeWhereActive` call, not a macro.
 
-```php
-protected function getStats(): array
-{
-    return [
-        Stat::make('MRR', $this->formatCurrency($mrr))
-            ->description($trend['description'])
-            ->descriptionIcon($trend['icon'])
-            ->color($trend['color'])
-            ->chart($this->getMRRChart())
-            ->extraAttributes([
-                'class' => 'bg-gradient-to-r from-primary-50 to-primary-100',
-            ]),
-    ];
-}
-```
+`AIArmada\FilamentCashierChip\Concerns\InteractsWithCashierChipData` is the reusable piece:
+`subscriptionQuery()` (owner-scoped), `normalizeToMonthly()`, `formatCurrency()`, and
+`rememberWidgetValue()`.
 
 ## Owner Scoping
 
@@ -277,17 +282,22 @@ and select only the columns they need instead of hydrating full models.
 
 ### Polling
 
-Widgets don't poll by default. To add live updates:
+The four stats widgets do not poll. The two chart widgets set a non-static `$pollingInterval` of
+`'120s'`. To add live updates to your own widget, use the same non-static form:
 
 ```php
-protected static ?string $pollingInterval = '30s';
+protected ?string $pollingInterval = '30s';
 ```
+
+> **warning**
+> `protected static ?string $pollingInterval` is silently ignored in Filament v5 — `HasPolling`
+> resolves `$pollingInterval` on the instance, not the class.
 
 ## Chart Widgets
 
 ### Revenue Chart
 
-Uses Filament's chart components:
+`getData()` returns Chart.js datasets plus labels, alongside `getType()` and `getOptions()`:
 
 ```php
 protected function getData(): array
@@ -295,10 +305,11 @@ protected function getData(): array
     return [
         'datasets' => [
             [
-                'label' => 'Revenue',
+                'label' => 'MRR',
                 'data' => $this->getMonthlyRevenue(),
-                'borderColor' => '#3b82f6',
-                'backgroundColor' => 'rgba(59, 130, 246, 0.1)',
+                'borderColor' => 'rgb(59, 130, 246)',
+                'backgroundColor' => 'rgba(59, 130, 246, 0.5)',
+                'fill' => true,
             ],
         ],
         'labels' => $this->getMonthLabels(),
@@ -308,19 +319,19 @@ protected function getData(): array
 
 ### Subscription Distribution
 
+Grouped by `chip_status` in SQL, not by plan name:
+
 ```php
 protected function getData(): array
 {
-    $distribution = $this->getDistribution();
-    
     return [
         'datasets' => [
             [
-                'data' => $distribution->pluck('count')->toArray(),
+                'data' => $counts,   // one count per non-zero status bucket
                 'backgroundColor' => $this->getColors(),
             ],
         ],
-        'labels' => $distribution->pluck('type')->toArray(),
+        'labels' => $labels,        // 'Active', 'Trialing', 'Canceled', …
     ];
 }
 ```
